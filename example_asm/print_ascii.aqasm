@@ -1,0 +1,8 @@
+; Stores all ASCII values in memory
+	MOV R0, #0
+next:	STR R0, R0
+	CMP R0, #255
+	BEQ halt
+	ADD R0, R0, #1
+	B next
+halt:	HALT

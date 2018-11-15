@@ -1,0 +1,10 @@
+	MOV R0, #1024
+countA:	SUB R0, R0, #1
+	CMP R0, #0
+	BEQ end
+	MOV R1, #1024
+countB:	SUB R1, R1, #1
+	CMP R1, #0
+	BNE countB
+	B countA
+end:	MOV R2, #1

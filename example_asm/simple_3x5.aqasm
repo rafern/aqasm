@@ -1,0 +1,10 @@
+; Simple test program which calculates 3 times 5 by adding 3 five times
+	MOV r0, #3
+	mov R1, #5
+	MoV r2, #0
+add:	ADD r2, r2, r0
+	SUB r1, r1, #1
+	CMp R1, #0
+	BNE add
+	STR r2, 0
+	Halt

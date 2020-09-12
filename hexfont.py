@@ -1,4 +1,3 @@
-#!/bin/env python3
 from numpy import zeros, uint8
 from OpenGL.GL import *
 
@@ -52,15 +51,10 @@ class HexFont:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
 
-    def bindTexture(self, tid):
-        # XXX this is unused but may be used in the future. Remove me if I'm not used when the project is done
-        glActiveTexture(GL_TEXTURE0)
-        glBindTexture(GL_TEXTURE_2D, tid)
-
     def drawGlyph(self, c, col, row, offX = 0, offY = 0):
         # Draw a glyph [c] at column [col] and row [row], with an offset of
         # ([offX], [offY]), defaulting to no offset. Needs a set current context
-        # and to be in GL_QUADS draw mode. No vertex arrays... FOR NOW (TODO???)
+        # and to be in GL_QUADS draw mode. No vertex arrays...
         glTexCoord2f((c * self.width) / (self.width * 256), 0)
         glVertex2f(col * self.width + offX, row * 16 + offY)
         glTexCoord2f(((c + 1) * self.width) / (self.width * 256), 0)
@@ -69,3 +63,8 @@ class HexFont:
         glVertex2f((col + 1) * self.width + offX, (row + 1) * 16 + offY)
         glTexCoord2f((c * self.width) / (self.width * 256), 1)
         glVertex2f(col * self.width + offX, (row + 1) * 16 + offY)
+
+    def drawString(self, s, col, row, offX = 0, offY = 0):
+        for c in s:
+            self.drawGlyph(ord(c), col, row, offX, offY)
+            col += 1

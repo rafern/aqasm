@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 import interpreter
 
 ## Unit-test
@@ -15,7 +15,7 @@ if __name__ == "__main__":
     print("Compiling code...")
     cpu = interpreter.aqasm(code, True)
 
-    if len(cpu.lex) == 0:
+    if len(cpu.compiled) == 0:
         print("No code to execute...")
         exit()
 

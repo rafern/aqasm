@@ -1,20 +1,14 @@
-#!/bin/env python3
 from interpreter import *
 from hexfont import *
-from wx import glcanvas
-from wx import *
-import _thread as thread
+from gldefaultcanvas import *
 from array import array
 
-class GLEditor(glcanvas.GLCanvas):
-    def __init__(self, parent, font):
-        super(GLEditor, self).__init__(parent, attribList = (
-                                                   glcanvas.WX_GL_RGBA,
-                                                   glcanvas.WX_GL_DOUBLEBUFFER,
-                                                   glcanvas.WX_GL_DEPTH_SIZE,
-                                                   24
-                                               ))
+class GLEditor(GLDefaultCanvas):
+    def __init__(self, parent, cpu, gllock, font):
+        super(GLEditor, self).__init__(parent, gllock)
 
+        # AQASM interpreter used for getting word range
+        self.cpu = cpu
         # Flag as editor context initialization and redraw needed
         self.initializeEditor = self.syntaxh = self.langext = True
         # Set used font
@@ -23,25 +17,15 @@ class GLEditor(glcanvas.GLCanvas):
         self.tabSize = 8
         self.cumulXScroll = self.cumulYScroll = 0
 
-        # Bind paint events to editor's draw callback
-        self.Bind(EVT_PAINT, self.onPaint)
-        # Bind resize events to editor's resize callback
-        self.Bind(EVT_SIZE, self.onResize)
         # Bind button presses
         self.Bind(EVT_CHAR, self.onKeydown)
+        self.Bind(EVT_MOTION, self.onMousemove)
         self.Bind(EVT_LEFT_DOWN, self.onMousedown)
         self.Bind(EVT_MOUSEWHEEL, self.onMousewheel)
-        
-        # For now the editor has no GL context. Call makeContext to get one
-        # Must be called AFTER there is a shown window in the screen
-        self.context = None
-
-    def makeContext(self):
-        self.context = glcanvas.GLContext(self)
 
     def resetEditor(self):
-        # Reset buffer, real (counting tabsize) and screen coords
-        self.x = self.y = self.rx = self.sx = self.sy = 0
+        # Reset buffer, drag origin, real (counting tabsize) and screen coords
+        self.x = self.y = self.dox = self.doy = self.rx = self.rdox = self.sx = self.sy = 0
 
     def lineEnd(self, i):
         # Get line end
@@ -53,7 +37,7 @@ class GLEditor(glcanvas.GLCanvas):
     def lineLength(self, i):
         return self.lineEnd(i) - self.lines[i]
 
-    def updateCursor(self):
+    def updateCursor(self, updateDragOrigin):
         # Update real cursor coords
         self.rx = 0
         offset = self.lines[self.y]
@@ -64,6 +48,18 @@ class GLEditor(glcanvas.GLCanvas):
                 pass
             else:
                 self.rx += 1
+
+        # Update real drag origin coords
+        if updateDragOrigin:
+            self.rdox = 0
+            offset = self.lines[self.doy]
+            for x in range(self.dox):
+                if self.filebuffer[offset + x] == 9: # Horizontal tab
+                    self.rdox = (self.rdox // self.tabSize + 1) * self.tabSize
+                elif self.filebuffer[offset + x] == 10: # Line feed
+                    pass
+                else:
+                    self.rdox += 1
 
         # Update screen coords
         # X
@@ -84,17 +80,25 @@ class GLEditor(glcanvas.GLCanvas):
         if self.sy < 0:
             self.sy = 0
 
-    def seekPos(self, x, y):
+    def seekPos(self, x, y, drag):
         lineCount = len(self.lines)
+
         # If too far down (after max line), go to end of file
         if y >= lineCount:
             self.y = lineCount - 1
             self.x = self.lineLength(self.y)
+
+            # If not a drag, then set the drag origin
+            if not drag:
+                self.doy = self.y
+                self.dox = self.x
             return
+
         self.y = y
         offset = self.lines[self.y]
         self.x = seekX = 0
         lineLength = self.lineLength(self.y)
+
         # Special case if last line, since the last line doesn't finish with
         # a line feed, resulting in an early seek
         if y + 1 == lineCount:
@@ -115,6 +119,11 @@ class GLEditor(glcanvas.GLCanvas):
             else:
                 seekX += 1
 
+        # If not a drag, then set the drag origin
+        if not drag:
+            self.doy = self.y
+            self.dox = self.x
+
     def shiftLineEnds(self, pivot, shift):
         for l in range(pivot + 1, len(self.lines)):
             self.lines[l] += shift
@@ -127,7 +136,11 @@ class GLEditor(glcanvas.GLCanvas):
     def updateTokens(self, l):
         lstart = self.lines[l]
         lend = self.lineEnd(l)
-        self.tokens[l] = lex.lex_highlight(self.filebuffer[lstart:lend])
+        self.tokens[l] = compiler.compiler_lexical_analysis(self.filebuffer[lstart:lend].tobytes().decode("ascii"), self.cpu.intMin, self.cpu.intMax, self.cpu.memWords - 1, self.cpu.bytesPerWord, self.langext)[1]
+
+    def updateAllTokens(self):
+        for l in range(len(self.lines)):
+            self.updateTokens(l)
 
     def typeChar(self, char):
         self.modified = True
@@ -143,8 +156,52 @@ class GLEditor(glcanvas.GLCanvas):
             self.y += 1
         else:
             self.x += 1
+        self.doy = self.y
+        self.dox = self.x
         self.updateTokens(self.y)
         self.updatePaneSize()
+
+    def delSelection(self):
+        self.modified = True
+        self.recompile = True
+
+        # Get selection's pivot (side closest to (0,0))
+        pivX = pivY = endX = endY = 0
+        if self.y == self.doy:
+            pivY = endY = self.y
+            pivX = min(self.x, self.dox)
+            endX = max(self.x, self.dox)
+        elif self.y < self.doy:
+            pivX = self.x
+            pivY = self.y
+            endX = self.dox
+            endY = self.doy
+        else:
+            pivX = self.dox
+            pivY = self.doy
+            endX = self.x
+            endY = self.y
+
+        # Delete characters in range
+        pivPos = self.lines[pivY] + pivX
+        endPos = self.lines[endY] + endX
+
+        del self.filebuffer[pivPos:endPos]
+
+        # Delete lines
+        if endY > pivY:
+            del self.lines[pivY + 1:endY + 1]
+
+        # Shift line ends
+        self.shiftLineEnds(pivY, pivPos - endPos)
+
+        # Move cursor to pivot
+        self.x = self.dox = pivX
+        self.y = self.doy = pivY
+        self.updateCursor(True)
+
+        # Update tokens
+        self.updateAllTokens()
 
     def delChar(self):
         self.modified = True
@@ -167,68 +224,38 @@ class GLEditor(glcanvas.GLCanvas):
                 self.x = bufPos - 1 - self.lines[self.y]
             else:
                 self.x -= 1
+            self.doy = self.y
+            self.dox = self.x
             self.delChar()
 
-    def onPaint(self, event):
-        # Redraw editor
-        self.drawEditor()
-        # Run default handler aswell
-        event.Skip()
-
-    def onResize(self, event):
-        CallAfter(self.doResizeEvent)
-        # Run default handler aswell
-        event.Skip()
-
-    def doResizeEvent(self):
-        # Get new editor size
-        self.editorSize = self.GetClientSize()
-        # Use the editor's GL context
-        self.SetCurrent(self.context)
-        # Set viewport and orthographic projection to use new size
-        glViewport(0, 0, self.editorSize.width, self.editorSize.height)
-        # Update orthographic projection
-        self.orthoEditor()
+    def resizeCanvas(self):
         # Update pre-calculated limits
         self.linePaneRight = self.font.width * self.linePaneSize
-        self.statusY = self.editorSize.height // 16 - 1
+        self.statusY = self.canvasSize.height // 16 - 1
         self.statusTop = self.statusY * 16
-        self.statusCols = self.editorSize.width // self.font.width
+        self.statusCols = self.canvasSize.width // self.font.width
         self.maxX = self.statusCols - self.linePaneSize + 1
         self.maxY = self.statusY - 1
         # Update cursor
-        self.updateCursor()
+        self.updateCursor(False)
 
-    def moveDelta(self, dx, dy):
-        update = False
-
-        while dx < 0:
-            dx += 1
-            if self.x > 0:
-                self.x -= 1
-                update = True
-            else:
-                break
-
-        if dx > 0:
+    def moveDelta(self, dx, dy, drag):
+        if dx != 0:
             # Since lineLength return line length including LF, if not the last
             # line, remove 1 from the lineMaxX
             lineMaxX = self.lineLength(self.y)
             if self.y + 1 < len(self.lines):
                 lineMaxX -= 1
-            while dx > 0:
-                dx -= 1
-                if self.x < lineMaxX:
-                    self.x += 1
-                    update = True
-                else:
-                    break
+            self.x += dx
+            if self.x < 0:
+                self.x = 0
+            elif self.x > lineMaxX:
+                self.x = lineMaxX
 
         while dy < 0:
             dy += 1
             if self.y > 0:
-                self.seekPos(self.rx, self.y - 1)
-                update = True
+                self.seekPos(self.rx, self.y - 1, drag)
             else:
                 break
 
@@ -237,116 +264,268 @@ class GLEditor(glcanvas.GLCanvas):
             while dy > 0:
                 dy -= 1
                 if self.y < lineLimit:
-                    self.seekPos(self.rx, self.y + 1)
-                    update = True
+                    self.seekPos(self.rx, self.y + 1, drag)
                 else:
                     break
 
-        if update:
-            self.updateCursor()
+        if not drag:
+            self.dox = self.x
+            self.doy = self.y
+
+        self.updateCursor(not drag)
+        self.Refresh()
+
+    def moveToSelPivot(self):
+        # Get selection's pivot (side closest to (0,0))
+        pivX = pivY = endX = endY = 0
+        if self.y == self.doy:
+            pivY = endY = self.y
+            pivX = min(self.x, self.dox)
+            endX = max(self.x, self.dox)
+        elif self.y < self.doy:
+            pivX = self.x
+            pivY = self.y
+            endX = self.dox
+            endY = self.doy
+        else:
+            pivX = self.dox
+            pivY = self.doy
+            endX = self.x
+            endY = self.y
+
+        # Move cursor to pivot
+        self.x = self.dox = pivX
+        self.y = self.doy = pivY
+
+        # Update
+        self.updateCursor(True)
+        self.Refresh()
+
+    def copySelection(self):
+        # Get selection's pivot (side closest to (0,0)) and end
+        pivX = pivY = endX = endY = 0
+        if self.y == self.doy:
+            pivY = endY = self.y
+            pivX = min(self.x, self.dox)
+            endX = max(self.x, self.dox)
+        elif self.y < self.doy:
+            pivX = self.x
+            pivY = self.y
+            endX = self.dox
+            endY = self.doy
+        else:
+            pivX = self.dox
+            pivY = self.doy
+            endX = self.x
+            endY = self.y
+
+        # Get selection's pivot and end in buffer
+        pivPos = self.lines[pivY] + pivX
+        endPos = self.lines[endY] + endX
+
+        if not TheClipboard.IsOpened():
+            data = TextDataObject()
+            data.SetText(self.filebuffer[pivPos:endPos].tobytes())
+            TheClipboard.Open()
+            TheClipboard.SetData(data)
+            TheClipboard.Close()
+
+    def textCut(self):
+        if self.dox != self.x or self.doy != self.y:
+            self.copySelection()
+            self.delSelection()
             self.Refresh()
+
+    def textCopy(self):
+        self.copySelection()
+        self.moveToSelPivot()
+
+    def textPaste(self):
+        if not TheClipboard.IsOpened():
+            data = TextDataObject()
+            TheClipboard.Open()
+            success = TheClipboard.GetData(data)
+            TheClipboard.Close()
+            if success:
+                try:
+                    text = data.GetText().encode('ascii')
+                except:
+                    with MessageDialog(None,
+                            "Clipboard text is not valid ASCII",
+                            "Could not paste text",
+                            OK | ICON_INFORMATION) as dialog:
+                        dialog.ShowModal()
+                else:
+                    if self.dox != self.x or self.doy != self.y:
+                        self.delSelection()
+
+                    # Filter out carriage returns due to Windows line endings
+                    text = array('B', [c for c in text if c != 13])
+
+                    # Insert text in buffer
+                    pos = self.lines[self.y] + self.x
+                    pasteSize = len(text)
+                    self.filebuffer[pos:pos] = text
+                    self.shiftLineEnds(self.y, pasteSize)
+
+                    # Insert lines into line list, move cursor and update tokens
+                    for i in range(pos, pos + pasteSize):
+                        # Add line when the character is a line feed
+                        if self.filebuffer[i] == 10:
+                            self.lines.insert(self.y + 1, i + 1)
+                            self.tokens.insert(self.y + 1, None)
+                            self.updateTokens(self.y)
+                            self.y += 1
+                            self.x = 0
+                        else:
+                            self.x += 1
+
+                    # Also update tokens on last line
+                    self.updateTokens(self.y)
+
+                    # Update drag origin
+                    self.dox = self.x
+                    self.doy = self.y
+
+                    # Update
+                    self.modified = True
+                    self.recompile = True
+                    self.updateCursor(True)
+                    self.Refresh()
+
+    def textSelectAll(self):
+        # Set drag origin to 0, 0 and cursor to end of file
+        self.doy = self.dox = 0
+        self.y = len(self.lines) - 1
+        self.x = self.buffersize - self.lines[self.y]
+
+        # Update
+        self.updateCursor(True)
+        self.Refresh()
 
     def onKeydown(self, event):
         keycode = event.GetKeyCode()
         update = False
         default = True
+        drag = False
+        selecting = self.dox != self.x or self.doy != self.y
         # Process key events
         if keycode == WXK_LEFT:
+            drag = event.ShiftDown()
             default = False
             # moveDelta redraws, so update doesn't have to be set to true
-            self.moveDelta(-1, 0)
+            self.moveDelta(-1, 0, drag)
         elif keycode == WXK_RIGHT:
+            drag = event.ShiftDown()
             default = False
-            self.moveDelta(1, 0)
+            self.moveDelta(1, 0, drag)
         elif keycode == WXK_UP:
+            drag = event.ShiftDown()
             default = False
-            self.moveDelta(0, -1)
+            self.moveDelta(0, -1, drag)
         elif keycode == WXK_DOWN:
+            drag = event.ShiftDown()
             default = False
-            self.moveDelta(0, 1)
+            self.moveDelta(0, 1, drag)
         elif keycode == WXK_DELETE:
-            self.delChar()
+            if selecting:
+                self.delSelection()
+            else:
+                self.delChar()
+            drag = False
             update = True
         elif keycode == WXK_BACK:
-            self.backspaceChar()
-            update = True
-        elif keycode == WXK_RETURN:
-            self.typeChar(10)
+            if selecting:
+                self.delSelection()
+            else:
+                self.backspaceChar()
+            drag = False
             update = True
         elif keycode == WXK_HOME:
+            drag = event.ShiftDown()
             self.x = 0
+            if not drag:
+                self.dox = 0
             update = True
         elif keycode == WXK_END:
+            drag = event.ShiftDown()
             self.x = self.lineLength(self.y)
             if self.y + 1 < len(self.lines):
                 self.x -= 1
+            if not drag:
+                self.dox = self.x
             update = True
         elif keycode == WXK_PAGEUP:
-            self.moveDelta(0, -self.maxY // 2)
+            drag = event.ShiftDown()
+            self.moveDelta(0, -self.maxY // 2, drag)
         elif keycode == WXK_PAGEDOWN:
-            self.moveDelta(0, self.maxY // 2)
-        elif (keycode >= 32 and keycode <= 126) or keycode == 9:
-            if keycode == 9:
+            drag = event.ShiftDown()
+            self.moveDelta(0, self.maxY // 2, drag)
+        elif (keycode >= 32 and keycode <= 126) or keycode == WXK_TAB or keycode == WXK_RETURN:
+            if keycode == WXK_TAB:
+                keycode = 9
                 default = False
+            elif keycode == WXK_RETURN:
+                keycode = 10
+            if selecting:
+                self.delSelection()
             self.typeChar(keycode)
             update = True
 
         if update:
             # Update cursor
-            self.updateCursor()
+            self.updateCursor(not drag)
             # Redraw
             self.Refresh()
         if default:
             # Also run default handler
             event.Skip()
 
-    def onMousedown(self, event):
+    def onMouseGeneric(self, event, drag):
         x, y = event.GetPosition()
         x -= self.linePaneRight
-        # Abort if not in the editor's bounds
-        if y >= self.statusTop:
-            return
-        elif x < 0:
-            return
-        self.seekPos(self.sx + (x // self.font.width), self.sy + (y // 16))
-        # Update cursor and redraw
-        self.updateCursor()
-        self.Refresh()
+
+        # Move if in the editor's bounds
+        if y < self.statusTop and x >= 0 and y >= 0:
+            # Set the drag start and move the cursor
+            newX = self.sx + (x // self.font.width)
+            newY = self.sy + (y // 16)
+            self.seekPos(newX, newY, drag)
+
+            # Update cursor and redraw
+            self.updateCursor(not drag)
+            self.Refresh()
+
         # Also run default handler
         event.Skip()
 
+    def onMousemove(self, event):
+        # Move the cursor only if dragging
+        if event.Dragging():
+            self.onMouseGeneric(event, True)
+
+    def onMousedown(self, event):
+        self.onMouseGeneric(event, False)
+
     def onMousewheel(self, event):
         threshold = event.GetWheelDelta()
+        drag = event.ShiftDown()
         if event.GetWheelAxis() == MOUSE_WHEEL_HORIZONTAL:
             self.cumulXScroll += event.GetWheelRotation()
             moveX = self.cumulXScroll // threshold
             self.cumulXScroll = self.cumulXScroll % threshold
-            self.moveDelta(moveX, 0)
+            self.moveDelta(moveX, 0, drag)
         else:
             self.cumulYScroll -= event.GetWheelRotation()
             moveY = self.cumulYScroll // threshold
             self.cumulYScroll = self.cumulYScroll % threshold
-            self.moveDelta(0, moveY)
+            self.moveDelta(0, moveY, drag)
 
-    def orthoEditor(self):
-        # Tell OpenGL that we are changing the projection matrix
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        # Setup orthographic projection for easier 2D coordinates
-        # The coordinates go from top-left to bottom-right
-        glOrtho(0, self.editorSize.width, self.editorSize.height, 0, -1, 1)
-        # Switch back to model matrix
-        glMatrixMode(GL_MODELVIEW)
-
-    def drawEditor(self):
-        # Tell wxPython that we are drawing while processing this event
-        PaintDC(self)
-        # Tell OpenGL to use the text editor context
-        self.SetCurrent(self.context)
+    def redrawCanvas(self):
         # If not yet initialized, initialize it
         if self.initializeEditor:
             # Setup orthographic projection
-            self.orthoEditor()
+            self.updateOrtho()
             # Setup font texture and bind it
             self.font.genTexture()
             # Enable alpha blending
@@ -370,9 +549,9 @@ class GLEditor(glcanvas.GLCanvas):
         glVertex2f(0, self.statusTop)
         glColor3f(0.85,0.8,0.8)
         glVertex2f(0, self.statusTop)
-        glVertex2f(self.editorSize.width, self.statusTop)
-        glVertex2f(self.editorSize.width, self.editorSize.height)
-        glVertex2f(0, self.editorSize.height)
+        glVertex2f(self.canvasSize.width, self.statusTop)
+        glVertex2f(self.canvasSize.width, self.canvasSize.height)
+        glVertex2f(0, self.canvasSize.height)
         glColor3f(1,1,1)
         # Draw footer pane
         glEnd()
@@ -412,19 +591,21 @@ class GLEditor(glcanvas.GLCanvas):
                 if self.syntaxh and lastToken < tokenCount:
                     if i - lstart >= self.tokens[l][lastToken][0]:
                         thisToken = self.tokens[l][lastToken][1]
-                        if thisToken == lex.token.comment:
+                        if thisToken == compiler.token.comment:
                             glColor3f(0.5,0.5,0.5)
-                        elif thisToken == lex.token.whitespace or thisToken == lex.token.separator or thisToken == lex.token.identifier:
+                        elif thisToken == compiler.token.whitespace or thisToken == compiler.token.separator or thisToken == compiler.token.identifier:
                             glColor3f(1,1,1)
-                        elif thisToken == lex.token.decimal:
-                            glColor3f(0.8,0.4,0)
-                        elif thisToken == lex.token.address:
+                        elif thisToken == compiler.token.decimal:
+                            glColor3f(0.9,0.9,0.4)
+                        elif thisToken == compiler.token.floating:
+                            glColor3f(1,0.5,0.75)
+                        elif thisToken == compiler.token.address:
                             glColor3f(0,0.6,0.9)
-                        elif thisToken == lex.token.register:
+                        elif thisToken == compiler.token.register:
                             glColor3f(0.7,0,0.7)
-                        elif thisToken == lex.token.labelid or thisToken == lex.token.label:
+                        elif thisToken == compiler.token.labelid or thisToken == compiler.token.label:
                             glColor3f(0.1,0.6,0.1)
-                        elif thisToken == lex.token.error:
+                        elif thisToken == compiler.token.error:
                             glColor3f(0.9,0,0)
                         clearHigh = True
                         lastToken += 1
@@ -494,24 +675,123 @@ class GLEditor(glcanvas.GLCanvas):
         # End drawing glyph quads
         glEnd()
 
-        # Draw cursor quad
+        # Start drawing cursor
         glDisable(GL_TEXTURE_2D)
         glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ZERO)
         glBegin(GL_QUADS)
         glColor3f(1,1,1)
-        glVertex2f(self.linePaneRight + self.font.width * (self.rx - self.sx), 16 * (self.y - self.sy))
-        glVertex2f(self.linePaneRight + self.font.width * (self.rx - self.sx) + 2, 16 * (self.y - self.sy))
-        glVertex2f(self.linePaneRight + self.font.width * (self.rx - self.sx) + 2, 16 * (self.y - self.sy + 1))
-        glVertex2f(self.linePaneRight + self.font.width * (self.rx - self.sx), 16 * (self.y - self.sy + 1))
+
+        # Draw cursor
+        if self.y == self.doy:
+            quadTop = 16 * (self.y - self.sy)
+            quadBot = quadTop + 16
+            quadLeft = quadRight = 0
+
+            if self.x == self.dox:
+                # Not a selection, set up cursor
+                quadLeft = self.linePaneRight + self.font.width * (self.rx - self.sx)
+                quadRight = quadLeft + 2
+            else:
+                # Single line selection, set up selection area
+                quadLeft = self.linePaneRight + self.font.width * (min(self.rx, self.rdox) - self.sx)
+                quadRight = self.linePaneRight + self.font.width * (max(self.rx, self.rdox) - self.sx)
+
+                # If the selection is left to right, then add 2 extra pixels
+                # to the right to indicate the direction of the selection
+                if self.x > self.dox:
+                    quadRight += 2
+
+                # Clamp if selection goes off-screen
+                if quadLeft < self.linePaneRight:
+                    quadLeft = self.linePaneRight
+                if quadRight > self.canvasSize.width:
+                    quadRight = self.canvasSize.width
+
+            glVertex2f(quadLeft, quadTop)
+            glVertex2f(quadRight, quadTop)
+            glVertex2f(quadRight, quadBot)
+            glVertex2f(quadLeft, quadBot)
+        else:
+            # Pick the top and bottom selection area
+            minSX = minSY = maxSX = maxSY = 0
+            maxCur = False
+            if self.y < self.doy:
+                minSX = self.rx - self.sx
+                minSY = self.y - self.sy
+                maxSX = self.rdox - self.sx
+                maxSY = self.doy - self.sy
+            else:
+                minSX = self.rdox - self.sx
+                minSY = self.doy - self.sy
+                maxSX = self.rx - self.sx
+                maxSY = self.y - self.sy
+
+                # If the cursor comes after the origin, then the bottom slice
+                # ends at the cursor
+                maxCur = True
+
+            # Top, right-going slice
+            if minSX < self.maxX and minSY >= 0:
+                quadTopTS = 16 * minSY
+                quadBotTS = quadTopTS + 16
+                quadLeftTS = self.linePaneRight + self.font.width * minSX
+                quadRightTS = self.canvasSize.width
+
+                # Clamp if selection's left edge not visible
+                if quadLeftTS < self.linePaneRight:
+                    quadLeftTS = self.linePaneRight
+
+                glVertex2f(quadLeftTS, quadTopTS)
+                glVertex2f(quadRightTS, quadTopTS)
+                glVertex2f(quadRightTS, quadBotTS)
+                glVertex2f(quadLeftTS, quadBotTS)
+
+            # Middle, full-lines slice
+            if maxSY - minSY > 1:
+                quadTopMS = 16 * (minSY + 1)
+                quadBotMS = 16 * maxSY
+                quadLeftMS = self.linePaneRight
+                quadRightMS = self.canvasSize.width
+
+                # Clamp if selection's horizontal edges go off-screen
+                if quadTopMS < 0:
+                    quadTopMS = 0
+                if quadBotMS > self.statusTop:
+                    quadBotMS = self.statusTop
+
+                glVertex2f(quadLeftMS, quadTopMS)
+                glVertex2f(quadRightMS, quadTopMS)
+                glVertex2f(quadRightMS, quadBotMS)
+                glVertex2f(quadLeftMS, quadBotMS)
+
+            # Bottom, left-going slice
+            if maxSX >= self.sx and maxSY < self.maxY:
+                quadTopBS = 16 * maxSY
+                quadBotBS = quadTopBS + 16
+                quadLeftBS = self.linePaneRight
+                quadRightBS = self.linePaneRight + self.font.width * maxSX
+
+                # Add extra 2 pixels to the right if at the cursor
+                if maxCur:
+                    quadRightBS += 2
+
+                # Clamp if selection's right edge is not visible
+                if quadRightBS > self.canvasSize.width:
+                    quadRightBS = self.canvasSize.width
+
+                glVertex2f(quadLeftBS, quadTopBS)
+                glVertex2f(quadRightBS, quadTopBS)
+                glVertex2f(quadRightBS, quadBotBS)
+                glVertex2f(quadLeftBS, quadBotBS)
+
+        # End drawing cursor
         glEnd()
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glFlush()
 
-        # Swap buffer to display
-        self.SwapBuffers()
-
     def openFile(self, filename):
         self.recompile = True
+        showLineDialog = False
         if filename == None:
             self.modified = False
             self.filename = None
@@ -528,23 +808,47 @@ class GLEditor(glcanvas.GLCanvas):
                 self.tokens = list()
 
                 # Read file in 1 KiB blocks until EOF
-                eof = False
-                while not eof:
+                while True:
                     try:
                         self.filebuffer.fromfile(f, 1024)
                     except EOFError:
-                        eof = True
+                        break
+
+                # Filter out carriage returns to convert to unix line ends.
+                # Using list comprehension, where 13 is the ascii value for CR.
+                # Also keeps track of the initial size to determine wether there
+                # was a line ending conversion
+                initialSize = len(self.filebuffer)
+                self.filebuffer = array('B', [c for c in self.filebuffer if c != 13])
+
+                # Get buffer size
                 self.buffersize = len(self.filebuffer)
+
+                # If the size changed, then line endings were converted.
+                # Inform the user
+                if self.buffersize != initialSize:
+                    showLineDialog = True
 
                 # Parse file for newlines and save their positions
                 for i in range(self.buffersize):
                     if self.filebuffer[i] == ord('\n'):
-                        self.tokens.append(lex.lex_highlight(self.filebuffer[self.lines[-1]:i]))
+                        self.tokens.append(compiler.compiler_lexical_analysis(self.filebuffer[self.lines[-1]:i].tobytes().decode("ascii"), self.cpu.intMin, self.cpu.intMax, self.cpu.memWords - 1, self.cpu.bytesPerWord, self.langext)[1])
                         self.lines.append(i + 1)
-                self.tokens.append(lex.lex_highlight(self.filebuffer[self.lines[-1]:self.buffersize]))
+                self.tokens.append(compiler.compiler_lexical_analysis(self.filebuffer[self.lines[-1]:self.buffersize].tobytes().decode("ascii"), self.cpu.intMin, self.cpu.intMax, self.cpu.memWords - 1, self.cpu.bytesPerWord, self.langext)[1])
         self.resetEditor()
         self.updatePaneSize()
         self.Refresh()
+
+        # Dialogs are asynchronous and cause a refresh when shown, so they must
+        # be shown after fully loading the file so that data races do not occur.
+        # Specifically, showing the dialog while loading the file corrupts the
+        # token list and editor properties
+        if showLineDialog:
+            with MessageDialog(None,
+                    "Windows line endings were converted to Unix line endings",
+                    "Line endings converted",
+                    OK | ICON_INFORMATION) as dialog:
+                dialog.ShowModal()
 
     def saveFile(self, filename):
         # Abort if filename is None. This shouldn't happen normally
@@ -554,3 +858,4 @@ class GLEditor(glcanvas.GLCanvas):
             self.modified = False
             self.filename = filename
             self.filebuffer.tofile(f)
+        self.Refresh()

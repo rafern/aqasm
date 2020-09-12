@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 from gleditor import *
 from glmemviewer import *
+from gldisplay import *
+import _thread as thread
 from time import time, sleep
+import wx.lib.newevent as wxNE
 
 class AQASMFrame(Frame):
     # Toolbar item IDs
@@ -17,12 +20,12 @@ class AQASMFrame(Frame):
     CPUStopEvent, EVT_CPU_STOP = wxNE.NewEvent()
     CPULogEvent, EVT_CPU_LOG = wxNE.NewEvent()
 
-    def __init__(self, font, filename = None, size = (640, 480)):
+    def __init__(self, font, gllock, size = DefaultSize, bytesPerWord = 1, memWords = 256, filename = None):
         super(AQASMFrame, self).__init__(None, size = size)
 
         # Internals
         # Initialize interpreter
-        self.cpu = aqasm("", False, 8, 256)
+        self.cpu = aqasm("", False, bytesPerWord, memWords)
         # Mutex locks
         self.cpuLock = thread.allocate_lock()
         # Is code running
@@ -51,17 +54,29 @@ class AQASMFrame(Frame):
         quititem = filemenu.Append(ID_EXIT, "Quit")
         menu.Append(filemenu, "&File")
 
+        # Edit menu
+        editmenu = Menu()
+        cutitem = editmenu.Append(ID_CUT, "Cut")
+        copyitem = editmenu.Append(ID_COPY, "Copy")
+        pasteitem = editmenu.Append(ID_PASTE, "Paste")
+        editmenu.AppendSeparator()
+        selallitem = editmenu.Append(ID_SELECTALL, "Select all\tCTRL+A")
+        menu.Append(editmenu, "&Edit")
+
         # Options menu
         optmenu = Menu()
         self.syntaxhitem = optmenu.Append(ID_ANY, "Syntax highlighting", kind=ITEM_CHECK)
         self.langextitem = optmenu.Append(ID_ANY, "Language extensions", kind=ITEM_CHECK)
+        bytesperworditem = optmenu.Append(ID_ANY, "Change bytes per words...")
+        memwordsitem = optmenu.Append(ID_ANY, "Change memory size...")
         optmenu.Check(self.syntaxhitem.GetId(), True)
         optmenu.Check(self.langextitem.GetId(), True)
         menu.Append(optmenu, "&Options")
 
         # Windows menu
         winmenu = Menu()
-        memwinitem = winmenu.Append(ID_ANY, "Show memory viewer")
+        memwinitem = winmenu.Append(ID_ANY, "Show &memory viewer")
+        displaywinitem = winmenu.Append(ID_ANY, "Show &display")
         menu.Append(winmenu, "&Windows")
         # Menu bar - end
         self.SetMenuBar(menu)
@@ -81,7 +96,7 @@ class AQASMFrame(Frame):
 
         # Body
         # Editor canvas
-        self.gleditor = GLEditor(leftPanel, font)
+        self.gleditor = GLEditor(leftPanel, self.cpu, gllock, font)
         # Expand editor canvas' pane
         leftSizer = BoxSizer(VERTICAL)
         leftSizer.Add(self.gleditor, 1, EXPAND, 0)
@@ -89,7 +104,7 @@ class AQASMFrame(Frame):
 
         # Logbox
         self.logbox = TextCtrl(rightPanel, -1,
-                               style = TE_MULTILINE | TE_READONLY | TE_RICH)
+                style = TE_MULTILINE | TE_READONLY)
         # Expand logbox's pane
         rightSizer = BoxSizer(VERTICAL)
         rightSizer.Add(self.logbox, 1, EXPAND, 0)
@@ -131,9 +146,16 @@ class AQASMFrame(Frame):
         self.Bind(EVT_MENU, self.onSaveFile, saveitem)
         self.Bind(EVT_MENU, self.onSaveAsFile, saveasitem)
         self.Bind(EVT_MENU, self.onQuit, quititem)
+        self.Bind(EVT_MENU, self.onCut, cutitem)
+        self.Bind(EVT_MENU, self.onCopy, copyitem)
+        self.Bind(EVT_MENU, self.onPaste, pasteitem)
+        self.Bind(EVT_MENU, self.onSelAll, selallitem)
         self.Bind(EVT_MENU, self.toggleSyntaxH, self.syntaxhitem)
         self.Bind(EVT_MENU, self.toggleLangExt, self.langextitem)
+        self.Bind(EVT_MENU, self.onChangeBytesPerWord, bytesperworditem)
+        self.Bind(EVT_MENU, self.onChangeMemWords, memwordsitem)
         self.Bind(EVT_MENU, self.showMemViewer, memwinitem)
+        self.Bind(EVT_MENU, self.showDisplay, displaywinitem)
         self.Bind(EVT_CLOSE, self.onClose)
         self.Bind(self.EVT_CPU_UPDATE, self.onCPUUpdate)
         self.Bind(self.EVT_CPU_STOP, self.onCPUStop)
@@ -147,26 +169,33 @@ class AQASMFrame(Frame):
             self.SetTitle("AQASM - " + filename)
 
         # Create memory viewer, but don't show it
-        self.memviewer = GLMemViewer(self, self.cpu, font)
+        self.memviewer = GLMemViewer(self, self.cpu, gllock, font, (480, 360))
+        # Also create display, but don't show it
+        self.display = GLDisplay(self, self.cpu, gllock, (160, 120))
 
         # Set minimum size
-        self.SetMinSize(size)
+        self.SetMinSize(self.GetSize())
         # Show window and create GL contexts
         self.Show(True)
         self.gleditor.makeContext()
         self.memviewer.makeContext()
+        self.display.makeContext()
 
     def showMemViewer(self, event):
         self.memviewer.Show()
         self.memviewer.Raise()
 
+    def showDisplay(self, event):
+        self.display.Show()
+        self.display.Raise()
+
     def modifiedWarning(self):
         # Ask for user confirmation
         if self.gleditor.modified:
             if MessageBox("Changes will not be saved! Proceed?",
-                          "Confirmation required",
-                          ICON_QUESTION | YES_NO, self
-                          ) == NO:
+                    "Confirmation required",
+                    ICON_QUESTION | YES_NO, self
+                    ) == NO:
                 return True
         return False
 
@@ -184,9 +213,9 @@ class AQASMFrame(Frame):
 
         # Open file dialog
         with FileDialog(self, "Open AQASM file",
-                        wildcard="AQASM files (*.aqasm)|*.aqasm",
-                        style=FD_OPEN | FD_FILE_MUST_EXIST
-                        ) as fileDialog:
+                wildcard="AQASM files (*.aqasm)|*.aqasm",
+                style=FD_OPEN | FD_FILE_MUST_EXIST
+                ) as fileDialog:
             if fileDialog.ShowModal() == ID_CANCEL:
                 return
             # Try opening the file
@@ -196,9 +225,9 @@ class AQASMFrame(Frame):
     def onSaveAsFile(self, event):
         # Save file dialog
         with FileDialog(self, "Save AQASM file",
-                        wildcard="AQASM files (*.aqasm)|*.aqasm",
-                        style=FD_SAVE | FD_OVERWRITE_PROMPT
-                        ) as fileDialog:
+                wildcard="AQASM files (*.aqasm)|*.aqasm",
+                style=FD_SAVE | FD_OVERWRITE_PROMPT
+                ) as fileDialog:
             if fileDialog.ShowModal() == ID_CANCEL:
                 return
             # Get save path
@@ -220,6 +249,18 @@ class AQASMFrame(Frame):
 
     def onQuit(self, event):
         self.Close()
+
+    def onCut(self, event):
+        self.gleditor.textCut()
+
+    def onCopy(self, event):
+        self.gleditor.textCopy()
+
+    def onPaste(self, event):
+        self.gleditor.textPaste()
+
+    def onSelAll(self, event):
+        self.gleditor.textSelectAll()
 
     def onClose(self, event):
         if self.modifiedWarning():
@@ -250,11 +291,13 @@ class AQASMFrame(Frame):
                 tstart = time()
                 self.cpuLock.acquire()
                 try:
-                    self.cpu.compile_code(self.gleditor.filebuffer.tobytes().decode('ascii'), self.gleditor.langext, 8, 256)
+                    self.cpu.compile_code(self.gleditor.filebuffer.tobytes().decode('ascii'), self.gleditor.langext, self.cpu.bytesPerWord, self.cpu.memWords)
                 except Exception as e:
                     self.log(e)
                     self.gleditor.recompile = True
                 else:
+                    if self.gleditor.langext and (len(self.cpu.compiled) - 1) > self.cpu.intMax:
+                        self.log('Warning: Non-label jumping will not work for lines over ', self.cpu.intMax, ' starting from zero')
                     self.log('Info: Compiled successfuly in ', round(1000 * (time() - tstart), 4), ' milliseconds')
                 finally:
                     self.cpuLock.release()
@@ -312,10 +355,6 @@ class AQASMFrame(Frame):
         self.memviewer.canvas.Refresh()
 
     def onCPUStop(self, event):
-        #self.zerocheck.SetValue(event.zero)
-        #self.signcheck.SetValue(event.sign)
-        #self.haltcheck.SetValue(event.halt)
-        #self.pcentry.SetValue(str(event.pc))
         self.onCPUUpdate(event)
         self.ToolBar.EnableTool(self.TB_ID_STOP, False)
         self.ToolBar.EnableTool(self.TB_ID_RESET, True)
@@ -331,13 +370,17 @@ class AQASMFrame(Frame):
                 if self.cpu.halt:
                     self.log("CPU is halted")
                 elif not self.gleditor.recompile:
-                    self.log("Stepping through line ", self.cpu.pc, ":")
+                    self.log("Stepping through line ", self.cpu.pc + 1, ":")
                     self.log(self.cpu.code[self.cpu.pc])
-                    self.cpu.step()
+                    try:
+                        self.cpu.step()
+                    except Exception as e:
+                        PostEvent(self, self.CPULogEvent(msg = ("An exception occured while running:\n", e)))
                     self.zerocheck.SetValue(self.cpu.zero)
                     self.signcheck.SetValue(self.cpu.sign)
                     self.haltcheck.SetValue(self.cpu.halt)
                     self.pcentry.SetValue(str(self.cpu.pc))
+                    self.memviewer.canvas.Refresh()
         elif button == self.TB_ID_RUN:
             if not self.runningCode and self.gleditor.buffersize > 0:
                 self.compileIfNeeded()
@@ -354,6 +397,7 @@ class AQASMFrame(Frame):
                 self.cpuLock.acquire()
                 try:
                     self.cpu.reset()
+                    self.display.reset()
                 except Exception as e:
                     self.log("An exception occured while resetting: ", e)
                 self.cpuLock.release()
@@ -361,8 +405,9 @@ class AQASMFrame(Frame):
                 self.signcheck.SetValue(self.cpu.sign)
                 self.haltcheck.SetValue(self.cpu.halt)
                 self.pcentry.SetValue(str(self.cpu.pc))
-                self.log("CPU reset")
                 self.memviewer.canvas.Refresh()
+                self.display.canvas.Refresh()
+                self.log("CPU reset")
         elif button == self.TB_ID_CLEARLOG:
             self.logbox.Clear()
 
@@ -386,6 +431,46 @@ class AQASMFrame(Frame):
     def toggleLangExt(self, event):
         self.gleditor.recompile = True
         self.gleditor.langext = self.langextitem.IsChecked()
+        self.gleditor.updateAllTokens()
+        self.Refresh()
+
+    def onChangeBytesPerWord(self, event):
+        newBytesPerWord = GetNumberFromUser("Enter new word length:", "Bytes", "Change word length...", self.cpu.bytesPerWord, 1, 4, self)
+        if newBytesPerWord != -1:
+            # Truncate number of words for memory if they become unnaddressable
+            newMemWords = self.cpu.memWords
+            newMemWordsMax = 2 ** (newBytesPerWord * 8)
+            if newMemWords > newMemWordsMax:
+                newMemWords = newMemWordsMax
+            self.cpuLock.acquire()
+            self.runningCode = False
+            self.gleditor.recompile = True
+            self.cpu.reset()
+            self.cpu.compile_code("", self.gleditor.langext, newBytesPerWord, newMemWords)
+            self.memviewer.resizeCanvas()
+            self.memviewer.Refresh()
+            self.gleditor.updateAllTokens()
+            self.Refresh()
+            self.cpuLock.release()
+
+    def onChangeMemWords(self, event):
+        # Limit memory size to 64 MiB (67108864 bytes)
+        memMax = self.cpu.uintMax + 1
+        phyMax = 67108864 // self.cpu.bytesPerWord
+        if memMax > phyMax:
+            memMax = phyMax
+        newMemWords = GetNumberFromUser("Enter new memory size:", "Words", "Change memory size...", self.cpu.memWords, 1, memMax, self)
+        if newMemWords != -1:
+            self.cpuLock.acquire()
+            self.runningCode = False
+            self.gleditor.recompile = True
+            self.cpu.reset()
+            self.cpu.compile_code("", self.gleditor.langext, self.cpu.bytesPerWord, newMemWords)
+            self.memviewer.resizeCanvas()
+            self.memviewer.Refresh()
+            self.gleditor.updateAllTokens()
+            self.Refresh()
+            self.cpuLock.release()
 
 class AQASMApp(App):
     # Deriving from App. This method is superior to creating an App instance as
@@ -402,7 +487,8 @@ class AQASMApp(App):
 
     def OnInit(self):
         unscii = HexFont(self.fontfile)
-        frame = AQASMFrame(unscii)
+        gllock = thread.allocate_lock()
+        frame = AQASMFrame(unscii, gllock, (640, 480), 2, 65536)
         self.SetTopWindow(frame)
         return True
 

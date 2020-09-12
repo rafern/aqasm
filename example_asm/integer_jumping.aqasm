@@ -1,0 +1,6 @@
+; Tests integer jumping by skiping the
+; halt instruction with an integer jump
+	MOV R0, #5
+	B R0
+	HALT
+	STR #1, 0 ; PC = 5 = line - 1

@@ -1,0 +1,44 @@
+; Example code for handling keyboard
+; input. Puts input in memory,
+; supports character deletion and
+; stops when escape is pressed.
+; Registers:
+; R0: Current address
+; R1: Last input
+; R2: Escape pressed (stop)
+; R3: Total keys pressed
+
+; Register key handler
+	MIVT #127, key
+; Main loop
+loop:	CMP R2, #0
+	BEQ loop
+	HALT
+
+; Key handler
+key:	;ADD R3, R3, #1
+	IN R1, #0
+	; Delete on backspace and del
+	CMP R1, #8
+	BEQ del
+	CMP R1, #127
+	BEQ del
+	; Stop on escape
+	CMP R1, #27
+	BEQ stop
+	; Print unless unprintable
+	CMP R1, #32
+	BLT skip
+	CMP R1, #126
+	BGT skip
+	B print
+del:	CMP R0, #0 ; Skip if no chars
+	BEQ skip
+	SUB R0, R0, #1
+	STR #0, R0
+skip:	IRET
+print:	STR R1, R0
+	ADD R0, R0, #1
+	IRET
+stop:	MOV R2, #1
+	IRET

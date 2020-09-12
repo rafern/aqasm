@@ -1,0 +1,26 @@
+; This will only work with at least 2
+; bytes, due to display dimensions and
+; floating point accuracy
+	MOV R2, #1.60377358491; 255/159
+	MOV R3, #2.14285714286; 255/119
+loop:	OUT #0, #1
+	INC R0
+	STR R0, 0
+	ITOF R4, R0
+	FMUL R4, R4, R2
+	FTOI R4, R4
+	STR R4, 2
+	CMP R0, #160
+	BNE loop
+	MOV R0, #0
+	STR #0, 0
+	STR #0, 2
+	INC R1
+	STR R1, 1
+	ITOF R4, R1
+	FMUL R4, R4, R3
+	FTOI R4, R4
+	STR R4, 3
+	CMP R1, #120
+	BNE loop
+	HALT

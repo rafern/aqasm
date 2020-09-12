@@ -1,0 +1,7 @@
+		B start
+IRQ_div_zero:	MOV R0, #127
+		IRET
+start:		MIVT #0, IRQ_div_zero
+		MOV R0, #1
+		DIV R0, R0, #0
+		STR R0, 0

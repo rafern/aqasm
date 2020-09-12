@@ -1,0 +1,56 @@
+; Mandelbrot set escape time algorithm
+; Uses some magic numbers to avoid division
+; Working registers:
+; R0: pixel x
+; R1: pixel y
+; R2: scaled pixel x, aka real part's offset
+; R3: scaled pixel y, aka imaginary part's offset
+; R4: working x, aka real part
+; R5: working y, aka imaginary part
+; R6: iteration
+; R7-11: temporary variables
+; R12: max iteration. Change it if you want to
+
+; User values
+	MOV R12, #20
+; Setup initial values
+	MOV R1, #0
+	MOV R3, #1.0
+	STR R1, 1
+yloop:	MOV R0, #0
+	MOV R2, #-2.5
+	STR R0, 0
+xloop:	MOV R4, #0.0
+	MOV R5, #0.0
+	MOV R6, #0
+	STR #255, 3 ; Draw progress pixel
+	OUT #0, #1
+	STR #0, 3
+iloop:	CMP R6, R12 ; Skip if at max iteration
+	BEQ iskip
+	FMUL R7, R4, R4 ; Skip if z's modulus is greater than 4
+	FMUL R8, R5, R5
+	FADD R9, R7, R8
+	FCMP R9, #4.0
+	BGT iskip
+	FSUB R9, R7, R8 ; Find x and y
+	FADD R9, R9, R2
+	FMUL R10, R4, R5
+	FMUL R10, R10, #2.0
+	FADD R5, R10, R3
+	MOV R4, R9
+	INC R6 ; Next iteration
+	B iloop
+iskip:	MUL R11, R6, #10 ; Found max depth, draw pixel
+	STR R11, 2
+	OUT #0, #1
+	ADD R0, R0, #1 ; Move right
+	STR R0, 0
+	FADD R2, R2, #0.021875
+	CMP R0, #160
+	BNE xloop
+	INC R1 ; Move down and leftmost
+	STR R1, 1
+	FSUB R3, R3, #0.01666666666
+	CMP R1, #120
+	BNE yloop

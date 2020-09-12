@@ -1,6 +1,3 @@
-; Infinite loop for testing threading capabilities
-	MOV R0, #0
-	MOV R1, #1
-loop:	CMP R0, #0
-	CMP R1, #0
+loop:	INC R0
 	B loop
+; Infinite loop for testing threading capabilities

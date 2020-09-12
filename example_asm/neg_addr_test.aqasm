@@ -1,0 +1,4 @@
+	MOV R0, #-1
+	STR #-86, R0
+	LDR R12, R0
+	STR R12, 0

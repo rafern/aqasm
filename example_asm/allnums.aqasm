@@ -1,0 +1,6 @@
+; Store all possible numbers in memory
+; Warning: runs forever
+	MOV R0, #0
+str:	STR R0, R0
+	INC R0
+	B str
